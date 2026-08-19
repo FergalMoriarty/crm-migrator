@@ -1,0 +1,15 @@
+# Generated, not authored. Reproducible from db/generate_source.py with a fixed
+# seed, so committing it would only mean reviewing 2,594 rows of noise in every
+# diff. If the data ever needs to be pinned, pin the generator.
+data/source/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# dbt (increment 2 onwards)
+target/
+dbt_packages/
+logs/

@@ -1,0 +1,44 @@
+# Local Postgres for crm-migrator.
+#
+# VERSION IS PINNED to 16.4 on purpose. "postgres:16" moves under you and
+# "postgres:latest" moves under you weekly; a project whose point is
+# reproducibility cannot have a floating database version. When you upgrade,
+# you upgrade deliberately and in a commit.
+#
+# HOST PORT IS 5433, not 5432. Anyone who has worked with Postgres for 27 years
+# has a local one already listening on 5432, and the failure when they collide
+# is a confusing authentication error rather than a clear port clash. Container
+# side stays 5432 — only the mapping moves.
+#
+# THE DDL IS NOT MOUNTED into /docker-entrypoint-initdb.d. It would run
+# automatically on first start, which is convenient exactly once: initdb
+# scripts only run when the data volume is empty, so every later edit to the
+# DDL appears to do nothing until you destroy the volume. That failure wastes
+# an afternoon. Running the DDL explicitly means one path and no surprises.
+
+services:
+  postgres:
+    image: postgres:16.4
+    container_name: meridian_crm_pg
+    environment:
+      POSTGRES_USER: meridian
+      POSTGRES_PASSWORD: meridian
+      POSTGRES_DB: meridian_crm
+      # Deterministic collation and UTF-8, so ORDER BY and text comparison
+      # behave identically on every machine this is cloned onto.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Without this, `docker compose up -d` returns before Postgres is
+      # accepting connections and the very next command fails for no visible
+      # reason.
+      test: ["CMD-SHELL", "pg_isready -U meridian -d meridian_crm"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:

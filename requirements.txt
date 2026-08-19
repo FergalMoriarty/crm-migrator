@@ -1,0 +1,3 @@
+# Increment 1 only needs a Postgres driver. dbt-core and dbt-postgres arrive in
+# increment 2, pinned then, so that a dbt version bump is a visible commit.
+psycopg2-binary==2.9.9
