@@ -1,0 +1,74 @@
+# _sources.yml — declares the raw tables to dbt.
+#
+# WHAT A SOURCE IS, IN PLAIN TERMS
+#     A named pointer to a table dbt did not build. Nothing more. Declaring one
+#     buys three things:
+#       1. Models say {{ source('raw_crm', 'landlords') }} instead of
+#          raw.landlords. If the schema is ever renamed, one line changes here
+#          rather than one line in every model.
+#       2. The raw tables appear in the lineage graph, so the docs show where
+#          the data entered the warehouse.
+#       3. Freshness and tests can be attached to them.
+#
+# WHY SOURCES AND NOT SEEDS
+#     A seed is a CSV that dbt itself loads into the warehouse with `dbt seed`,
+#     meant for small static reference data — a country lookup, a mapping
+#     table — that belongs in version control. An agency's CRM export is
+#     neither small nor static nor ours to version. It arrives by a process
+#     outside dbt (db/load_source.py), which is exactly the situation sources
+#     describe.
+#
+# WHY ONE SOURCE, NOT ONE PER AGENCY
+#     raw holds whichever agency's export is currently loaded — the loader
+#     truncates first. So the source is the landing zone, not the agency. Which
+#     agency the rows came from is a column (_source_file), not a table name.
+#     Phase 2 changes the contents of these tables, not their names.
+#
+# THE LEADING UNDERSCORE in the filename is convention, not function: it sorts
+# YAML above the .sql models in a directory listing. dbt does not care.
+
+version: 2
+
+sources:
+  - name: raw_crm
+    description: >
+      The landing zone. One table per CSV in the currently loaded agency
+      export, every column text, no constraints. Populated by
+      db/load_source.py, never by dbt.
+    database: meridian_crm
+    schema: raw
+
+    # FRESHNESS — and an honest caveat.
+    #
+    # dbt source freshness runs `SELECT max(_loaded_at)` against each table and
+    # compares it to now(). If the newest row is older than warn_after it
+    # warns; older than error_after it fails.
+    #
+    # PUSHING BACK ON MY OWN CONFIG: this feature is built for sources that are
+    # continuously loaded, where "no new rows in six hours" means a pipeline
+    # has broken. A one-off acquisition export is loaded once and then sits
+    # there, so freshness here does not detect a broken feed — it detects that
+    # you are about to run dbt against yesterday's load and possibly think it
+    # is today's. That is a real and useful thing to catch, but it is not what
+    # the feature is for, and on a genuinely one-off migration you would be
+    # entitled to leave freshness off entirely. It is configured because the
+    # mechanic is worth knowing and because phase 2 reloads raw repeatedly.
+    freshness:
+      warn_after: { count: 12, period: hour }
+      error_after: { count: 24, period: hour }
+
+    # The column freshness measures. It must be a timestamp, which is why the
+    # DDL adds _loaded_at rather than relying on anything in the CSV — the
+    # agency's own date columns are text in six different formats and several
+    # of them are wrong.
+    loaded_at_field: _loaded_at
+
+    tables:
+      - name: landlords
+        description: Landlord records as exported. 154 rows for 150 people — four exist twice under different refs.
+      - name: properties
+        description: Properties as exported, referencing landlords by landlordref.
+      - name: tenancies
+        description: Tenancies as exported, referencing properties by propref.
+      - name: payments
+        description: Payment transactions as exported, referencing tenancies by tenancyref.

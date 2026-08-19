@@ -1,0 +1,74 @@
+# dbt_project.yml — the file dbt reads first.
+#
+# WHAT DBT ACTUALLY DOES
+#     Every .sql file under models/ is a SELECT statement. dbt reads it,
+#     renders the Jinja in it, wraps the result in CREATE VIEW / CREATE TABLE
+#     according to the materialisation configured here, works out the order to
+#     run them in from which models reference which, and sends the SQL to
+#     Postgres. It is a SQL compiler and a scheduler. It is not a database and
+#     it does not move data — Postgres does all the work.
+#
+# WHY THE PROJECT SITS IN A SUBDIRECTORY
+#     Repo root holds the database, the generator and the loader; crm_migrator/
+#     holds the dbt project. Keeping them apart means `dbt run` cannot be
+#     confused about its project root, and it makes the boundary explicit: dbt
+#     consumes what db/ produces and never the reverse.
+
+name: "crm_migrator"
+version: "1.0.0"
+
+# Which profile (connection details) to use, by name, from profiles.yml.
+# This is the only link between the project and the credentials; the project
+# is portable, the profile is environment-specific.
+profile: "crm_migrator"
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  crm_migrator:
+    # MATERIALISATION PER LAYER, and the reasoning.
+    #
+    # staging = view. These models are thin — rename, cast, normalise — and
+    # rebuilding them costs nothing because the work happens at query time. A
+    # view also means there is exactly one copy of the truth: change the
+    # staging SQL and every downstream model sees the change on its next run,
+    # with no stale table sitting behind it.
+    # ALTERNATIVE CONSIDERED: table. Faster to query, but it puts a copy of
+    # every source row on disk to save time on a step that is already cheap,
+    # and it introduces a window where staging is stale relative to raw.
+    staging:
+      +materialized: view
+      +schema: staging
+
+    # intermediate = view for now. Entity resolution (phase 2) may be
+    # expensive enough to justify a table; that decision gets made when there
+    # is something to measure, not in advance.
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+
+    # marts = table. These are what people query, repeatedly, joining across
+    # them. Paying the build cost once beats paying the view-expansion cost on
+    # every query, and a mart is the thing you most want to be stable while
+    # someone reads a report off it.
+    marts:
+      +materialized: table
+      +schema: marts
+
+# A SURPRISE WORTH KNOWING ABOUT NOW
+#     `+schema: staging` does NOT mean "build into a schema called staging". By
+#     default dbt CONCATENATES it onto the target schema from profiles.yml, so
+#     with target schema `dbt_fergal` the models land in `dbt_fergal_staging`.
+#     That behaviour lives in a built-in macro called generate_schema_name, and
+#     it exists so that two developers pointed at the same database do not
+#     overwrite each other's models. It catches everyone once. We override it
+#     later if the naming becomes annoying; for now, know why the schema has a
+#     prefix you did not type.

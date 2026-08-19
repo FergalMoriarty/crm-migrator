@@ -1,0 +1,43 @@
+# profiles.yml — how dbt connects. This is the only file that knows the
+# database exists at a particular host with a particular password.
+#
+# WHY THIS IS IN THE REPO AND NOT ~/.dbt/
+#     dbt looks for profiles.yml in --profiles-dir, then $DBT_PROFILES_DIR,
+#     then the current working directory, then ~/.dbt/. The convention is
+#     ~/.dbt/profiles.yml, and the reason is that it keeps credentials out of
+#     version control.
+#     Here every value comes from env_var with a local-development default, so
+#     there is no secret to leak — the password is "meridian" and the database
+#     is a container on your laptop. Keeping it in the repo means a clone runs
+#     with no hidden setup step, which matters for a project whose whole point
+#     is being reproducible.
+#     THE RULE THIS DEPENDS ON: the moment a real credential is needed, it goes
+#     in the environment and never in this file. env_var() with no default
+#     fails loudly at parse time if the variable is missing, which is the
+#     behaviour you want in production and the reason the defaults below are
+#     acceptable in development.
+
+crm_migrator:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('MERIDIAN_HOST', 'localhost') }}"
+      port: "{{ env_var('MERIDIAN_PORT', '5433') | int }}"
+      user: "{{ env_var('MERIDIAN_USER', 'meridian') }}"
+      password: "{{ env_var('MERIDIAN_PASSWORD', 'meridian') }}"
+      dbname: "{{ env_var('MERIDIAN_DB', 'meridian_crm') }}"
+
+      # The schema dbt builds into. Combined with the +schema settings in
+      # dbt_project.yml this produces dbt_fergal_staging, dbt_fergal_marts and
+      # so on — see the note at the bottom of that file.
+      schema: "{{ env_var('MERIDIAN_SCHEMA', 'dbt_meridian') }}"
+
+      # Threads = how many models dbt builds in parallel where the DAG allows
+      # it. Four is sensible on a laptop. Raising it does not make a single
+      # model faster; it only helps when there are independent models to run at
+      # the same time, and it raises the connection count against Postgres.
+      threads: 4
+
+      # Fail rather than hang if the database is unreachable.
+      connect_timeout: 10
