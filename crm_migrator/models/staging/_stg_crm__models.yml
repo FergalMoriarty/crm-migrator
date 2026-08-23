@@ -1,0 +1,258 @@
+# _stg_crm__models.yml — documentation and generic tests for the staging layer.
+#
+# THE FOUR KINDS OF TEST IN THIS PROJECT, AND WHEN EACH IS RIGHT
+#
+#   1. BUILT-IN GENERIC  unique, not_null, accepted_values, relationships.
+#      Shipped with dbt. Attached to a column here in YAML. Use for the
+#      structural claims every table makes about itself.
+#
+#   2. PACKAGE GENERIC   dbt_utils.accepted_range, expression_is_true,
+#      not_null_proportion. Someone else's well-tested version of a test you
+#      would otherwise write badly. Use when the check is generic across every
+#      industry — a number in a range, a proportion above a threshold.
+#
+#   3. CUSTOM GENERIC    not_mojibaked, written in tests/generic/. Use when a
+#      check is specific to THIS data but applies to many columns. The bar is
+#      reuse: seven columns here need it.
+#
+#   4. SINGULAR          one file in tests/, one assertion, no parameters.
+#      Use when the check is about relationships BETWEEN models, or reaches
+#      back to a source, or is a one-off invariant that could never take an
+#      argument. See tests/assert_staging_preserves_source_row_counts.sql.
+#
+#   The distinction that matters: a generic test asks "is this column
+#   well-formed?". A singular test asks "is this specific thing true about my
+#   warehouse?". Reaching for the wrong one produces either seven copies of a
+#   file or a macro with one caller.
+#
+# SEVERITY
+#   Every test below is error unless stated. A test set to warn does not fail
+#   the run and does not fail CI, which makes it documentation with a query
+#   attached — occasionally the right answer, never the default.
+
+version: 2
+
+models:
+  - name: stg_crm__landlords
+    description: >
+      One row per landlord record in the Harcourt & Vine export, cleaned but
+      NOT deduplicated. 154 rows for 150 people: four exist twice under
+      different refs. Merging them is intermediate's job.
+    columns:
+      - name: landlord_id
+        description: The agency's own reference, e.g. HV-00001. Text, never cast to a number.
+        tests:
+          - unique
+          - not_null
+
+      - name: landlord_name
+        description: Name reordered to 'First Surname' with any title stripped. Case is NOT normalised.
+        tests:
+          - not_mojibaked
+
+      - name: landlord_name_key
+        description: >
+          Lowercased, accents folded, punctuation removed. For matching only,
+          never for display. Not unique — the four duplicate landlords are
+          exactly why it exists.
+        tests:
+          - not_null
+
+      - name: email
+        description: Lowercased, trailing semicolon stripped, first address taken where two were supplied.
+        tests:
+          # A COLLAPSE DETECTOR, NOT A QUALITY STANDARD.
+          #
+          # Set deliberately low. A landlord with no email is a gap, not a
+          # defect, and no agency ever agreed to a coverage figure. This only
+          # fires if the column stops populating almost entirely - an export
+          # where the field did not come through at all.
+          #
+          # An earlier version used at_least: 0.85, chosen because current
+          # coverage is 90%. That is a threshold reverse-engineered from the
+          # data it tests, and it would fail a perfectly good second agency
+          # that simply holds fewer emails. Whether cleaning DISCARDS emails
+          # is asserted properly in
+          # tests/assert_cleaning_does_not_discard_contact_details.sql, by
+          # comparing against the source rather than against a number.
+          - dbt_utils.not_null_proportion:
+              arguments:
+                at_least: 0.4
+
+      - name: notes
+        description: Free text, HTML stripped and whitespace collapsed. Original in notes_raw.
+        tests:
+          - not_mojibaked
+
+      - name: status
+        description: Canonical status. 'A' is ASSUMED to abbreviate Active - unconfirmed with the agency.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['active', 'inactive', 'archived', 'unknown']
+
+      - name: phone_type
+        description: Derived from the E.164 prefix. NULL where no number parsed.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['mobile', 'landline']
+
+      - name: is_valid_email
+        description: >
+          Three-valued. true = supplied and parses, false = supplied and does
+          not, NULL = nothing supplied. NULL is not a failure.
+
+      - name: source_agency
+        description: Derived from the loader's _source_file stamp, not hardcoded.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['harcourt_vine']
+
+  - name: stg_crm__properties
+    description: One row per property in the export. 300 rows, five of which reference a landlord not in the export.
+    columns:
+      - name: property_id
+        tests:
+          - unique
+          - not_null
+
+      - name: landlord_id
+        description: >
+          References stg_crm__landlords. Five values do not resolve, because
+          the agency's export ran against two tables at different times.
+        tests:
+          # SEVERITY WARN, DELIBERATELY.
+          #
+          # These orphans exist in the SOURCE. They are a pre-existing defect
+          # in the agency's CRM, not something this project introduced, and
+          # staging is forbidden from filtering them out — see
+          # assert_staging_preserves_source_row_counts.
+          #
+          # An error here would mean `dbt build` is permanently red for a
+          # condition nobody can fix from inside this repo, and a permanently
+          # red build trains people to stop reading the output. That is worse
+          # than a warning nobody reads, because it also hides the failures
+          # that DO matter.
+          #
+          # Note the contrast with crm-migration-validator, which FAILS on an
+          # orphaned foreign key. There the orphan means the migration lost a
+          # parent row. Here it means the agency did. Same query, different
+          # verdict, because the question is different.
+          - relationships:
+              arguments:
+                to: ref('stg_crm__landlords')
+                field: landlord_id
+              config:
+                severity: warn
+
+      - name: bedrooms
+        description: Studio mapped to 0, not NULL - a studio has no separate bedroom, which is a number, not an unknown.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 12
+              # Nulls are properties where beds was blank or unparseable, and
+              # bedrooms_unparsed records which. Not this test's business.
+              config:
+                where: "bedrooms is not null"
+
+      - name: property_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['terrace', 'semi_detached', 'detached', 'apartment', 'unknown']
+
+      - name: monthly_rent
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 20000
+              config:
+                where: "monthly_rent is not null"
+
+      - name: description
+        tests:
+          - not_mojibaked
+
+  - name: stg_crm__tenancies
+    description: One row per tenancy. 340 rows, six referencing a property not in the export.
+    columns:
+      - name: tenancy_id
+        tests:
+          - unique
+          - not_null
+
+      - name: property_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_crm__properties')
+                field: property_id
+              config:
+                severity: warn
+
+      - name: tenant_name
+        tests:
+          - not_mojibaked
+
+      - name: comments
+        tests:
+          - not_mojibaked
+
+    tests:
+      # A MODEL-LEVEL TEST — takes an expression rather than a column, so it
+      # lives here rather than under a column.
+      #
+      # A tenancy that ends before it starts is not a parsing quirk, it is
+      # either a data entry error or a date format we have read backwards.
+      # This is the closest thing to a check on the DD/MM assumption that is
+      # possible without knowing the agency's locale: it cannot prove the
+      # dates are right, only that they are not self-contradictory.
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "end_date >= start_date"
+          config:
+            where: "start_date is not null and end_date is not null"
+
+  - name: stg_crm__payments
+    description: One row per payment. 1,800 rows, 42 of them refunds written in accounting brackets.
+    columns:
+      - name: payment_id
+        tests:
+          - unique
+          - not_null
+
+      - name: tenancy_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_crm__tenancies')
+                field: tenancy_id
+              config:
+                severity: warn
+
+      - name: payment_method
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['bacs', 'standing_order', 'cash', 'card', 'cheque', 'unknown']
+
+      - name: payment_reference
+        tests:
+          - not_mojibaked
+
+    tests:
+      # is_refund is derived from the sign of amount, so this asserts the two
+      # cannot disagree. It looks tautological and is not: if someone later
+      # sets is_refund from the payment method or a reference keyword instead,
+      # this fails the moment the two definitions diverge.
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "is_refund = (amount < 0)"
+          config:
+            where: "amount is not null"

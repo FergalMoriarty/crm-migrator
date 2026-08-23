@@ -1,0 +1,23 @@
+# packages.yml — third-party dbt packages.
+#
+# A package is another dbt project whose macros and tests become available in
+# this one. `dbt deps` downloads them into dbt_packages/, which is gitignored:
+# the record of what is installed is this file plus package-lock.yml, not the
+# downloaded copy.
+#
+# WHY dbt_utils
+#     Maintained by dbt Labs. It provides the tests everyone eventually writes
+#     badly by hand — range checks, cross-column expressions, null
+#     proportions. Writing those yourself is not a useful exercise. Writing
+#     the ones specific to UK lettings data is, which is why not_mojibaked is
+#     hand-rolled in tests/generic/ and accepted_range is not.
+#
+# WHY THE VERSION IS PINNED
+#     Same reason Postgres is pinned in docker-compose. A test suite that
+#     quietly changes behaviour because someone ran `dbt deps` on a Tuesday is
+#     worse than no test suite. `dbt deps` also writes package-lock.yml
+#     recording the exact commit, and that file IS committed.
+
+packages:
+  - package: dbt-labs/dbt_utils
+    version: 1.3.0
