@@ -52,28 +52,15 @@ nulled as (
         tenancyref,
         propref,
 
-        {%- set nothing = "('', 'n/a', 'na', 'none', 'null', '-', '.', 'unknown', 'not known', 'tbc')" %}
+        {{ clean_null_placeholders('tenantname') }}  as tenantname,
+        {{ clean_null_placeholders('tenantemail') }} as tenantemail,
+        {{ clean_null_placeholders('tenantphone') }} as tenantphone,
+        {{ clean_null_placeholders('startdate') }}   as startdate,
+        {{ clean_null_placeholders('enddate') }}     as enddate,
+        {{ clean_null_placeholders('rent') }}        as rent,
+        {{ clean_null_placeholders('depositheld') }} as depositheld,
 
-        case when lower(trim(tenantname))  in {{ nothing }} then null else trim(tenantname)  end as tenantname,
-        case when lower(trim(tenantemail)) in {{ nothing }} then null else trim(tenantemail) end as tenantemail,
-        case when lower(trim(tenantphone)) in {{ nothing }} then null else trim(tenantphone) end as tenantphone,
-        case when lower(trim(startdate))   in {{ nothing }} then null else trim(startdate)   end as startdate,
-        case when lower(trim(enddate))     in {{ nothing }} then null else trim(enddate)     end as enddate,
-        case when lower(trim(rent))        in {{ nothing }} then null else trim(rent)        end as rent,
-        case when lower(trim(depositheld)) in {{ nothing }} then null else trim(depositheld) end as depositheld,
-
-        nullif(
-            trim(
-                regexp_replace(
-                    regexp_replace(
-                        replace(replace(replace(replace(replace(
-                            comments,
-                            '&nbsp;', ' '), '&amp;', '&'), '&lt;', '<'), '&gt;', '>'), '&#39;', ''''),
-                        '<[^>]*>', ' ', 'g'),
-                    '\s+', ' ', 'g')
-            ),
-            ''
-        ) as comments,
+        {{ clean_free_text('comments') }} as comments,
 
         _source_file,
         _loaded_at,
@@ -84,58 +71,25 @@ nulled as (
 
 ),
 
-prepared as (
-
-    select
-        *,
-        regexp_replace(tenantphone, '[^0-9]', '', 'g')          as phone_digits,
-        nullif(regexp_replace(rent, '[^0-9.\-]', '', 'g'), '')        as rent_digits,
-        nullif(regexp_replace(depositheld, '[^0-9.\-]', '', 'g'), '') as deposit_digits
-    from nulled
-
-),
-
 parsed as (
 
     select
         tenancyref as tenancy_id,
         propref    as property_id,
 
-        -- Same two name forms as landlords: 'SURNAME, First' and
-        -- 'First Surname'. Case is left alone for the same reason.
-        case
-            when tenantname is null then null
-            when tenantname like '%,%' then
-                trim(regexp_replace(split_part(tenantname, ',', 2), '\s+', ' ', 'g'))
-                || ' ' ||
-                trim(regexp_replace(split_part(tenantname, ',', 1), '\s+', ' ', 'g'))
-            else trim(regexp_replace(tenantname, '\s+', ' ', 'g'))
-        end as name_ordered,
+        {{ normalise_person_name('tenantname') }} as tenant_name,
 
         case
             when tenantemail is null then null
             else lower(trim(trim(trailing ';' from trim(split_part(tenantemail, '/', 1)))))
         end as tenant_email,
+        (tenantemail is not null) as tenant_email_supplied,
 
-        case
-            when phone_digits is null or phone_digits = '' then null
-            when phone_digits like '0044%'          then '+44' || substring(phone_digits from 5)
-            when phone_digits like '44%' and length(phone_digits) >= 12
-                                                    then '+44' || substring(phone_digits from 3)
-            when phone_digits like '0%'             then '+44' || substring(phone_digits from 2)
-            when phone_digits ~ '^[1-9][0-9]{8,9}$' then '+44' || phone_digits
-            else null
-        end as tenant_phone,
+        {{ parse_uk_phone('tenantphone') }} as tenant_phone,
+        (tenantphone is not null) as tenant_phone_supplied,
 
-        case
-            when startdate is null                     then null
-            when startdate ~ '^\d{4}-\d{2}-\d{2}'      then to_date(left(startdate, 10), 'YYYY-MM-DD')
-            when startdate ~ '^\d{2}/\d{2}/\d{4}'      then to_date(left(startdate, 10), 'DD/MM/YYYY')
-            when startdate ~ '^\d{2}-\d{2}-\d{4}$'     then to_date(startdate, 'DD-MM-YYYY')
-            when startdate ~ '^\d{1,2}/\d{1,2}/\d{2}$' then to_date(startdate, 'FMDD/FMMM/YY')
-            when startdate ~ '^\d{5}$'                 then date '1899-12-30' + startdate::int
-            else null
-        end as start_date,
+        {{ parse_uk_date('startdate') }} as start_date,
+        {{ keep_if_unparsed('startdate', parse_uk_date('startdate')) }} as start_date_unparsed,
 
         /*
             END DATE. A NULL here is genuinely ambiguous and worth naming: it
@@ -145,31 +99,14 @@ parsed as (
             that treats NULL as "still running" is making an assumption that
             belongs in a mart, stated out loud, not here.
         */
-        case
-            when enddate is null                     then null
-            when enddate ~ '^\d{4}-\d{2}-\d{2}'      then to_date(left(enddate, 10), 'YYYY-MM-DD')
-            when enddate ~ '^\d{2}/\d{2}/\d{4}'      then to_date(left(enddate, 10), 'DD/MM/YYYY')
-            when enddate ~ '^\d{2}-\d{2}-\d{4}$'     then to_date(enddate, 'DD-MM-YYYY')
-            when enddate ~ '^\d{1,2}/\d{1,2}/\d{2}$' then to_date(enddate, 'FMDD/FMMM/YY')
-            when enddate ~ '^\d{5}$'                 then date '1899-12-30' + enddate::int
-            else null
-        end as end_date,
+        {{ parse_uk_date('enddate') }} as end_date,
+        {{ keep_if_unparsed('enddate', parse_uk_date('enddate')) }} as end_date_unparsed,
 
-        case
-            when rent_digits ~ '^-?[0-9]+(\.[0-9]+)?$' then rent_digits::numeric(12,2)
-            else null
-        end as rent,
+        {{ parse_currency('rent') }} as rent,
+        {{ keep_if_unparsed('rent', parse_currency('rent')) }} as rent_unparsed,
 
-        case
-            when rent is null                          then null
-            when rent_digits ~ '^-?[0-9]+(\.[0-9]+)?$' then null
-            else rent
-        end as rent_unparsed,
-
-        case
-            when deposit_digits ~ '^-?[0-9]+(\.[0-9]+)?$' then deposit_digits::numeric(12,2)
-            else null
-        end as deposit_held,
+        {{ parse_currency('depositheld') }} as deposit_held,
+        {{ keep_if_unparsed('depositheld', parse_currency('depositheld')) }} as deposit_held_unparsed,
 
         comments,
         comments_raw,
@@ -179,24 +116,30 @@ parsed as (
         _source_file                     as source_file,
         _loaded_at                       as loaded_at
 
-    from prepared
+    from nulled
 
 )
 
 select
     tenancy_id,
     property_id,
-    trim(regexp_replace(name_ordered, '^(MR|MRS|MS|MISS|DR|PROF)\.?\s+', '', 'i')) as tenant_name,
+    tenant_name,
     tenant_email,
-    (tenant_email is not null and tenant_email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$')
-        as is_valid_email,
+    -- Three-valued, as in stg_crm__landlords: NULL means nothing was supplied
+    -- to judge, false means something unusable was.
+    case when not tenant_email_supplied then null
+         else tenant_email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$' end as is_valid_email,
     tenant_phone,
-    (tenant_phone is not null) as is_valid_phone,
+    case when not tenant_phone_supplied then null
+         else tenant_phone is not null end as is_valid_phone,
     start_date,
+    start_date_unparsed,
     end_date,
+    end_date_unparsed,
     rent,
     rent_unparsed,
     deposit_held,
+    deposit_held_unparsed,
     comments,
     source_agency,
     source_file,

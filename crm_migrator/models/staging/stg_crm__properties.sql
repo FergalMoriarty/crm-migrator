@@ -53,57 +53,22 @@ nulled as (
         propref,
         landlordref,
 
-        {%- set nothing = "('', 'n/a', 'na', 'none', 'null', '-', '.', 'unknown', 'not known', 'tbc')" %}
+        {{ clean_null_placeholders('addr1') }}       as addr1,
+        {{ clean_null_placeholders('addr2') }}       as addr2,
+        {{ clean_null_placeholders('town') }}        as town,
+        {{ clean_null_placeholders('postcode') }}    as postcode,
+        {{ clean_null_placeholders('beds') }}        as beds,
+        {{ clean_null_placeholders('proptype') }}    as proptype,
+        {{ clean_null_placeholders('monthlyrent') }} as monthlyrent,
+        {{ clean_null_placeholders('datelisted') }}  as datelisted,
 
-        case when lower(trim(addr1))       in {{ nothing }} then null else trim(addr1)       end as addr1,
-        case when lower(trim(addr2))       in {{ nothing }} then null else trim(addr2)       end as addr2,
-        case when lower(trim(town))        in {{ nothing }} then null else trim(town)        end as town,
-        case when lower(trim(postcode))    in {{ nothing }} then null else trim(postcode)    end as postcode,
-        case when lower(trim(beds))        in {{ nothing }} then null else trim(beds)        end as beds,
-        case when lower(trim(proptype))    in {{ nothing }} then null else trim(proptype)    end as proptype,
-        case when lower(trim(monthlyrent)) in {{ nothing }} then null else trim(monthlyrent) end as monthlyrent,
-        case when lower(trim(datelisted))  in {{ nothing }} then null else trim(datelisted)  end as datelisted,
-
-        -- Same three-step free-text treatment as landlord notes: decode
-        -- entities, strip tags to a SPACE, collapse whitespace runs.
-        -- Descriptions carry heavier markup than notes did — <p> and <br/>
-        -- from a listings system — which is why the tag strip matters more
-        -- here than anywhere else in the project.
-        nullif(
-            trim(
-                regexp_replace(
-                    regexp_replace(
-                        replace(replace(replace(replace(replace(
-                            description,
-                            '&nbsp;', ' '), '&amp;', '&'), '&lt;', '<'), '&gt;', '>'), '&#39;', ''''),
-                        '<[^>]*>', ' ', 'g'),
-                    '\s+', ' ', 'g')
-            ),
-            ''
-        ) as description,
+        {{ clean_free_text('description') }} as description,
 
         _source_file,
         _loaded_at,
         description_raw
 
     from repaired
-
-),
-
-prepared as (
-
-    select
-        *,
-        regexp_replace(upper(postcode), '[^A-Z0-9]', '', 'g') as postcode_compact,
-        /*
-            CURRENCY AS TEXT. The export writes rent as '£1,250.00', '1250',
-            '1,250.00', '£ 1,250.00', 'GBP 1,250.00' and '£1250'. Stripping
-            everything that is not a digit, a dot or a minus handles all six.
-            Negatives are not possible for rent but the same expression is
-            reused for payments, where they are — see that model.
-        */
-        nullif(regexp_replace(monthlyrent, '[^0-9.\-]', '', 'g'), '') as rent_digits
-    from nulled
 
 ),
 
@@ -117,13 +82,7 @@ parsed as (
         addr2 as address_line_2,
         initcap(town) as town,
 
-        case
-            when postcode is null then null
-            when postcode_compact ~ '^[A-Z]{1,2}[0-9][A-Z0-9]?[0-9][A-Z]{2}$'
-                then left(postcode_compact, length(postcode_compact) - 3)
-                     || ' ' || right(postcode_compact, 3)
-            else upper(trim(regexp_replace(postcode, '\s+', ' ', 'g')))
-        end as postcode,
+        {{ format_uk_postcode('postcode') }} as postcode,
 
         /*
             BEDROOMS — '1', '2', 'Studio', '2 bed', '3.0' and ''.
@@ -165,40 +124,20 @@ parsed as (
             else 'unknown'
         end as property_type,
 
-        case
-            when rent_digits is null                     then null
-            when rent_digits ~ '^-?[0-9]+(\.[0-9]+)?$'   then rent_digits::numeric(12,2)
-            else null
-        end as monthly_rent,
+        {{ parse_currency('monthlyrent') }} as monthly_rent,
+        {{ keep_if_unparsed('monthlyrent', parse_currency('monthlyrent')) }} as monthly_rent_unparsed,
 
-        case
-            when monthlyrent is null                     then null
-            when rent_digits ~ '^-?[0-9]+(\.[0-9]+)?$'   then null
-            else monthlyrent
-        end as monthly_rent_unparsed,
-
-        -- Six date formats, guarded by shape first. See stg_crm__landlords
-        -- for why to_date() cannot be trusted without the regex, and for the
-        -- Excel 1899-12-30 epoch.
-        case
-            when datelisted is null                     then null
-            when datelisted ~ '^\d{4}-\d{2}-\d{2}'      then to_date(left(datelisted, 10), 'YYYY-MM-DD')
-            when datelisted ~ '^\d{2}/\d{2}/\d{4}'      then to_date(left(datelisted, 10), 'DD/MM/YYYY')
-            when datelisted ~ '^\d{2}-\d{2}-\d{4}$'     then to_date(datelisted, 'DD-MM-YYYY')
-            when datelisted ~ '^\d{1,2}/\d{1,2}/\d{2}$' then to_date(datelisted, 'FMDD/FMMM/YY')
-            when datelisted ~ '^\d{5}$'                 then date '1899-12-30' + datelisted::int
-            else null
-        end as date_listed,
+        {{ parse_uk_date('datelisted') }} as date_listed,
+        {{ keep_if_unparsed('datelisted', parse_uk_date('datelisted')) }} as date_listed_unparsed,
 
         description,
         description_raw,
 
         split_part(_source_file, '/', 1) as source_agency,
         _source_file                     as source_file,
-        _loaded_at                       as loaded_at,
-        postcode_compact
+        _loaded_at                       as loaded_at
 
-    from prepared
+    from nulled
 
 )
 
@@ -209,13 +148,14 @@ select
     address_line_2,
     town,
     postcode,
-    (postcode ~ '^[A-Z]{1,2}[0-9][A-Z0-9]? [0-9][A-Z]{2}$') as is_valid_postcode,
+    case when postcode is null then null else {{ is_valid_uk_postcode('postcode') }} end as is_valid_postcode,
     bedrooms,
     bedrooms_unparsed,
     property_type,
     monthly_rent,
     monthly_rent_unparsed,
     date_listed,
+    date_listed_unparsed,
     description,
     description_raw,
     source_agency,

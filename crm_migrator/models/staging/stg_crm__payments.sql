@@ -45,24 +45,11 @@ nulled as (
         paymentref,
         tenancyref,
 
-        {%- set nothing = "('', 'n/a', 'na', 'none', 'null', '-', '.', 'unknown', 'not known', 'tbc')" %}
+        {{ clean_null_placeholders('paidon') }} as paidon,
+        {{ clean_null_placeholders('amount') }} as amount,
+        {{ clean_null_placeholders('method') }} as method,
 
-        case when lower(trim(paidon)) in {{ nothing }} then null else trim(paidon) end as paidon,
-        case when lower(trim(amount)) in {{ nothing }} then null else trim(amount) end as amount,
-        case when lower(trim(method)) in {{ nothing }} then null else trim(method) end as method,
-
-        nullif(
-            trim(
-                regexp_replace(
-                    regexp_replace(
-                        replace(replace(replace(replace(replace(
-                            reference,
-                            '&nbsp;', ' '), '&amp;', '&'), '&lt;', '<'), '&gt;', '>'), '&#39;', ''''),
-                        '<[^>]*>', ' ', 'g'),
-                    '\s+', ' ', 'g')
-            ),
-            ''
-        ) as reference,
+        {{ clean_free_text('reference') }} as reference,
 
         _source_file,
         _loaded_at,
@@ -72,62 +59,25 @@ nulled as (
 
 ),
 
-prepared as (
-
-    select
-        *,
-        /*
-            NEGATIVES ARRIVE TWO WAYS.
-            '-£120.00' is obvious. '(120.00)' is accounting notation for the
-            same thing, and it is the dangerous one: strip the non-numeric
-            characters and it becomes '120.00', a refund silently recorded as
-            income. Every total in every downstream report would be wrong by
-            twice the refund and nothing would look broken.
-
-            So the bracket form is detected on the ORIGINAL string, before any
-            stripping, and applied as a sign afterwards.
-        */
-        (amount ~ '^\s*\(.*\)\s*$')                             as amount_is_bracketed,
-        nullif(regexp_replace(amount, '[^0-9.\-]', '', 'g'), '') as amount_digits
-    from nulled
-
-),
-
 parsed as (
 
     select
         paymentref as payment_id,
         tenancyref as tenancy_id,
 
-        case
-            when paidon is null                     then null
-            when paidon ~ '^\d{4}-\d{2}-\d{2}'      then to_date(left(paidon, 10), 'YYYY-MM-DD')
-            when paidon ~ '^\d{2}/\d{2}/\d{4}'      then to_date(left(paidon, 10), 'DD/MM/YYYY')
-            when paidon ~ '^\d{2}-\d{2}-\d{4}$'     then to_date(paidon, 'DD-MM-YYYY')
-            when paidon ~ '^\d{1,2}/\d{1,2}/\d{2}$' then to_date(paidon, 'FMDD/FMMM/YY')
-            when paidon ~ '^\d{5}$'                 then date '1899-12-30' + paidon::int
-            else null
-        end as paid_on,
+        {{ parse_uk_date('paidon') }} as paid_on,
+        {{ keep_if_unparsed('paidon', parse_uk_date('paidon')) }} as paid_on_unparsed,
 
-        case
-            when paidon is null then null
-            when paidon ~ '^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{2}-\d{2}-\d{4}$|^\d{1,2}/\d{1,2}/\d{2}$|^\d{5}$'
-                then null
-            else paidon
-        end as paid_on_unparsed,
-
-        case
-            when amount_digits is null                        then null
-            when amount_digits !~ '^-?[0-9]+(\.[0-9]+)?$'     then null
-            when amount_is_bracketed then -1 * amount_digits::numeric(12,2)
-            else amount_digits::numeric(12,2)
-        end as amount,
-
-        case
-            when amount is null                           then null
-            when amount_digits ~ '^-?[0-9]+(\.[0-9]+)?$'  then null
-            else amount
-        end as amount_unparsed,
+        /*
+            Negatives arrive two ways: '-£120.00' and '(120.00)'. The second
+            is accounting notation and is the dangerous one — strip the
+            non-numeric characters and it becomes a positive, booking a refund
+            as income. parse_currency detects the bracket on the original
+            string before stripping. That single ordering decision is why it
+            is a macro rather than four hand-written copies.
+        */
+        {{ parse_currency('amount') }} as amount,
+        {{ keep_if_unparsed('amount', parse_currency('amount')) }} as amount_unparsed,
 
         /*
             METHOD — nine spellings of five things. 'S/O' and 'Standing Order'
@@ -153,7 +103,7 @@ parsed as (
         _source_file                     as source_file,
         _loaded_at                       as loaded_at
 
-    from prepared
+    from nulled
 
 )
 
