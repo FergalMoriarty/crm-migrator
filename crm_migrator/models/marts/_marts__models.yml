@@ -1,0 +1,132 @@
+# _marts__models.yml
+#
+# NOTE THE CONTRAST WITH THE STAGING TESTS.
+#   In _stg_crm__models.yml the relationships tests are severity: warn,
+#   because they report what the agency sent and the orphans are not fixable
+#   from inside this repo.
+#   Here they are errors, because they report whether the WAREHOUSE is
+#   internally consistent - and it is, by construction, since every orphan is
+#   routed to an Unknown member rather than dropped or left NULL. If one of
+#   these ever fails it means a coalesce was removed or a join was changed,
+#   which is a bug in this project rather than a defect in the source.
+#   Same query, two layers, two verdicts, because they answer two questions.
+
+version: 2
+
+models:
+  - name: dim_landlord
+    description: >
+      One row per landlord RECORD as supplied, plus a synthetic Unknown row.
+      NOT one row per person - 154 records describe 150 people. Entity
+      resolution arrives in phase 2; until then anything counting rows here
+      is counting records.
+    columns:
+      - name: landlord_key
+        description: Surrogate key, md5 of source_agency + landlord_id. 'UNKNOWN' for the synthetic row.
+        tests:
+          - unique
+          - not_null
+      - name: landlord_id
+        tests:
+          - not_null
+      - name: landlord_name_key
+        description: >
+          NOT unique, deliberately. The four duplicated landlords are exactly
+          why this column exists. See
+          tests/assert_dim_landlord_grain_is_record_not_person.sql.
+      - name: is_unknown_member
+        tests:
+          - not_null
+      - name: landlord_name
+        tests:
+          - not_mojibaked
+
+  - name: dim_property
+    description: One row per property plus a synthetic Unknown row. 301 rows.
+    columns:
+      - name: property_key
+        tests:
+          - unique
+          - not_null
+      - name: landlord_key
+        description: >
+          Resolves to dim_landlord. Five properties reference a landlord
+          absent from the export and carry 'UNKNOWN'.
+        tests:
+          - not_null
+          # ERROR, not warn - see the note at the top of this file.
+          - relationships:
+              arguments:
+                to: ref('dim_landlord')
+                field: landlord_key
+      - name: description
+        tests:
+          - not_mojibaked
+
+  - name: dim_tenancy
+    description: One row per tenancy plus a synthetic Unknown row. 341 rows.
+    columns:
+      - name: tenancy_key
+        tests:
+          - unique
+          - not_null
+      - name: property_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_property')
+                field: property_key
+      - name: tenant_name
+        tests:
+          - not_mojibaked
+
+  - name: fct_payment
+    description: >
+      One row per payment transaction. 1,800 rows, no Unknown member - the
+      synthetic rows exist so facts can point AT something, not so facts can
+      be invented.
+    columns:
+      - name: payment_key
+        tests:
+          - unique
+          - not_null
+      - name: tenancy_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_tenancy')
+                field: tenancy_key
+      - name: property_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_property')
+                field: property_key
+      - name: landlord_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_landlord')
+                field: landlord_key
+      - name: amount
+        description: Fully additive. Refunds are negative, so SUM is a net figure.
+      - name: payment_method
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['bacs', 'standing_order', 'cash', 'card', 'cheque', 'unknown']
+      - name: payment_reference
+        tests:
+          - not_mojibaked
+
+    tests:
+      # The measure and the flag are derived from each other and must agree.
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "is_refund = (amount < 0)"
+          config:
+            where: "amount is not null"
