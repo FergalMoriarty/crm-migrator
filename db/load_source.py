@@ -49,7 +49,7 @@ TABLES = ["landlords", "properties", "tenancies", "payments"]
 
 DSN = os.environ.get(
     "MERIDIAN_DSN",
-    "postgresql://meridian:meridian@localhost:5433/meridian_crm",
+    "postgresql://meridian:meridian@localhost:5434/meridian_crm",
 )
 
 

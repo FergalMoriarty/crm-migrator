@@ -1,0 +1,140 @@
+# landlord_contact_snapshot
+#
+# WHAT A SNAPSHOT IS, IN PLAIN TERMS
+#     A table dbt maintains that records what a row looked like, and between
+#     which two moments that was true. Every time you run it, dbt compares the
+#     current source rows against the newest version it already holds. Where
+#     something it was told to watch has changed, it closes off the old
+#     version by stamping an end timestamp on it and inserts a new row.
+#     Nothing is ever updated in place except that end stamp, and nothing is
+#     ever deleted.
+#
+#     dbt calls the columns it adds:
+#         dbt_scd_id      surrogate key for this VERSION of the row
+#         dbt_valid_from  when this version started being true
+#         dbt_valid_to    when it stopped. NULL means it is the current one.
+#         dbt_updated_at  the source timestamp the comparison was made against
+#
+#     In Kimball terms this is a Slowly Changing Dimension Type 2, and if you
+#     have built one by hand you have written the close-off-and-insert logic
+#     yourself. dbt writes it for you — read target/run/ after a snapshot run
+#     to see the merge it generates.
+#
+# WHY THIS IS DIFFERENT FROM EVERY OTHER MODEL IN THE PROJECT
+#     Every other model is disposable. Drop the marts schema, run dbt build,
+#     and you get an identical result, because everything is derived from raw.
+#
+#     A snapshot is NOT derivable. It is the only place in this project where
+#     information exists that cannot be recreated from the source, because it
+#     records history the source does not keep — the CRM holds one current
+#     phone number per landlord and no memory of the previous one. Drop this
+#     table and the history is gone permanently.
+#     That has a practical consequence: `dbt build --full-refresh` will rebuild
+#     your marts happily and will destroy this. Treat it as data, not as
+#     output.
+#
+# WHY IT TARGETS THE SOURCE AND NOT dim_landlord
+#     The instinct is to snapshot the clean, modelled version. It is wrong,
+#     for two reasons.
+#
+#     First: a snapshot of a model records changes to the MODEL, not to the
+#     world. Edit a cleaning rule — add a placeholder spelling, fix another
+#     mojibake sequence — and every affected row appears to have changed. You
+#     would be manufacturing fake history for landlords who did nothing, and
+#     you could not tell it apart from real history afterwards.
+#
+#     Second: models are rebuildable and history is not. If the snapshot reads
+#     from raw and you later improve the staging logic, you can re-derive
+#     everything downstream and the history still holds. If it reads from a
+#     model and you later find that model was wrong, the history is wrong too
+#     and there is nothing to rebuild it from.
+#
+#     The cost, stated honestly: this snapshot records the MESS. A landlord
+#     whose phone was exported as '07700 900123' and later as '+44 7700
+#     900123' has not changed their number, but the raw text changed and this
+#     will record a new version. Comparing formats rather than values is the
+#     price of snapshotting before cleaning, and it is the cheaper mistake:
+#     spurious versions can be filtered out later, invented ones cannot be
+#     identified at all.
+#
+# WHY THE check STRATEGY AND NOT timestamp
+#     `timestamp` is the better strategy when the source has a reliable
+#     last-modified column: dbt compares one value and does no column-by-column
+#     work.
+#     raw.landlords has _loaded_at, which looks like exactly that column and is
+#     not. It records when the LOADER ran, not when the landlord changed. The
+#     loader truncates and reloads, so every row gets a fresh _loaded_at on
+#     every load — and a timestamp strategy would therefore create a brand new
+#     version of all 154 landlords every time you reloaded identical data.
+#     `check` compares the listed columns' values instead. Slower, and correct.
+#
+# WHY THESE COLUMNS AND NOT ALL OF THEM
+#     check_cols could be 'all'. It is not, because notes are edited constantly
+#     by staff and would generate a new version every time someone appended a
+#     line — burying the changes that matter under noise.
+#     The columns listed are the ones where a change has consequences: how you
+#     contact a landlord, where they are, and whether they are still active.
+#     That is a judgement about what is worth remembering, and it is the whole
+#     content of this file.
+
+# NOTE ON THIS FILE'S SHAPE
+#     Since dbt 1.9 a snapshot is DEFINED in YAML rather than in a .sql file
+#     with a {% snapshot %} block. One consequence catches people out: the
+#     definition and the documentation-and-tests must live in the SAME file.
+#     Adding a second _snapshots.yml describing this snapshot is a compilation
+#     error — "two schema.yml entries for the same resource" — because dbt
+#     treats every YAML entry for a resource as its one description.
+#     Models are different: dim_landlord.sql and _marts__models.yml are two
+#     files by design. Snapshots are one.
+
+snapshots:
+  - name: landlord_contact_snapshot
+    relation: source('raw_crm', 'landlords')
+    description: >
+      SCD Type 2 history of landlord contact details, taken from
+      raw.landlords BEFORE cleaning. The only table in this project that
+      cannot be rebuilt from its source, because it records history the CRM
+      does not keep. Do not --full-refresh it.
+    columns:
+      - name: dbt_scd_id
+        description: Surrogate key for one VERSION of a landlord record.
+        tests:
+          - unique
+          - not_null
+      - name: landlordref
+        description: >
+          The agency's reference. NOT unique here - one landlord has one row
+          per version, which is the entire point of the table.
+        tests:
+          - not_null
+    config:
+      schema: snapshots
+      unique_key: landlordref
+      strategy: check
+      check_cols:
+        - name
+        - email
+        - phone
+        - addrline1
+        - addrline2
+        - town
+        - postcode
+        - status
+
+      # WHAT HAPPENS WHEN A LANDLORD DISAPPEARS FROM THE EXPORT
+      #     Because the loader truncates raw before each load, a landlord the
+      #     agency removed from their CRM simply is not there next time.
+      #     Without this setting the snapshot would keep their last version
+      #     marked current forever, quietly asserting that a deleted landlord
+      #     is still live.
+      #     'new_record' closes off the old version and inserts a final row
+      #     marked deleted, so the disappearance itself is recorded with a
+      #     date. The alternative, 'invalidate', just closes the old version
+      #     and leaves no positive statement that a deletion happened.
+      #
+      #     THE TRAP: this cannot distinguish "the agency deleted this
+      #     landlord" from "the export was incomplete this time". A truncated
+      #     or failed export would mark hundreds of landlords deleted. That is
+      #     a real risk of snapshotting a full-reload source, and the defence
+      #     is the row-count check in db/verify_load.sql before dbt ever runs.
+      hard_deletes: new_record
